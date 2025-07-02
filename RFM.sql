@@ -174,3 +174,145 @@ where rank < 5
 group by [weekday]
 order by count(case when rank = 1 then [weekday] end) desc
 
+
+-- Top nhóm sản phẩm được mua nhiều nhất
+with table_joined as (
+    select customer_id, order_id, category
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+, table_count__order as (   
+    select category,
+        count(order_id) as [num_order]
+    from table_joined
+    group by category
+)
+select *,
+    sum(num_order) over() as [total_order],
+    format(cast([num_order] as float) / sum(num_order) over(), 'p') as [pct]
+from table_count__order
+order by num_order desc
+
+
+-- Thời gian trung bình giữa các lần mua hàng(tính tổng của các khách hàng)
+with table_joined as (
+    select customer_id, order_id, transaction_date
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+, table_num_day as (
+    select *,
+        lag(transaction_date, 1) over(partition by customer_id order by transaction_date asc) as [lag_transaction],
+        datediff(day, lag(transaction_date, 1) over(partition by customer_id order by transaction_date asc), transaction_date) as [num_day_buy]
+    from table_joined
+)
+, table_avg_day as (
+    select customer_id,
+        AVG(num_day_buy) as [avg_day]
+    from table_num_day
+    group by customer_id
+)
+select avg_day,
+    count(customer_id) as [count]
+from table_avg_day
+group by avg_day
+order by count(customer_id) desc
+
+
+
+-- Tỉ trong các nhóm sản phẩm được mua
+with table_joined as (
+    select customer_id, order_id, product_group
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+select product_group,
+    count(order_id) as [count],
+    sum(count(order_id)) over() as [total_order],
+    format(cast(count(order_id) as float) / sum(count(order_id)) over(), 'p') as [percent]
+from table_joined
+group by product_group
+order by count(order_id) desc
+
+
+-- Tổng số tiền của các nhóm khách hàng
+select segment,
+    sum(cast(monetary as bigint)) as [total_price_by_seg],
+    sum(sum(cast(monetary as bigint))) over () as [total_price],
+    format(cast(sum(cast(monetary as bigint)) as float) / sum(sum(cast(monetary as bigint))) over (), 'p') [percent]
+from table_tonghop
+group by segment
+order by  sum(monetary) desc
+
+
+-- Tính retention rate
+with table_joined as (
+    select customer_id, transaction_date,
+        min(transaction_date) over(partition by customer_id) as first_purchase_date,
+        datediff(month, min(transaction_date) over(partition by customer_id), transaction_date) as month_n
+    from (
+        select * from payment_history_17
+        union all
+        select * from payment_history_18
+    ) as table_union
+    join product as pro
+        on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+),
+cohort_labeled as (
+    select 
+        customer_id,
+        format(first_purchase_date, 'yyyy-MM') as cohort_month,
+        month_n
+    from table_joined
+),
+retention as (
+    select 
+        cohort_month, month_n,
+        count(distinct customer_id) as retained_customers
+    from cohort_labeled
+    group by cohort_month, month_n
+),
+retention_with_rate as (
+    select 
+        cohort_month, month_n, retained_customers,
+        max(case when month_n = 0 then retained_customers end) over(partition by cohort_month) as cohort_size
+    from retention
+)
+select 
+    cohort_month, month_n, retained_customers, cohort_size,
+    format(cast(retained_customers as float) / cohort_size, 'p') as retention_rate
+from retention_with_rate
+order by cohort_month, month_n;
+
