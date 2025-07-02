@@ -316,3 +316,108 @@ select
 from retention_with_rate
 order by cohort_month, month_n;
 
+
+
+-- Tính khoảng thời gian tập trung mua hàng (giờ nào)
+with table_joined as (
+    select customer_id, order_id, transaction_date,
+        DATEPART(hour, transaction_date) as [hour]
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+select [hour],
+    count(order_id) as [num_order],
+    sum(count(order_id)) over() as [total_order],
+    format(cast( count(order_id) as float) / sum(count(order_id)) over(), 'p') as [percent]
+from table_joined
+group by [hour]
+order by count(order_id) desc
+
+
+-- Tìm ra top những sản phẩm thường được tập khách hàng này thanh toán nhiều nhất (phục vụ cho việc mở rộng sản phẩm)
+with table_joined as (
+    select customer_id, order_id, sub_category
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+select distinct sub_category,
+    count(order_id) as [count_sub],
+    sum(count(order_id)) over() as [total_order],
+    format(cast(count(order_id) as float) / sum(count(order_id)) over(), 'p') as [percent]
+from table_joined
+group by  sub_category
+order by count(order_id) desc
+
+
+
+-- Phương thức thanh toán chủ yếu của tập khách hàng "Best Customers"
+with table_joined as (
+    select customer_id, order_id, [name]
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join paying_method as method
+    on table_union.payment_id = method.method_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+select [name],
+    count(order_id) as [num_order],
+    sum(count(order_id)) over() as [total_order],
+    format(cast(count(order_id) as float) / sum(count(order_id)) over(), 'p') as [percent]
+from table_joined
+group by [name]
+order by count(order_id) desc
+
+
+
+-- Tìm sản phẩm thu hút tập khách hàng này mua trong lần đầu tiên
+with table_joined as (
+    select customer_id, order_id, sub_category, transaction_date
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Best Customers'
+    )
+    and message_id = 1
+)
+, table_rank_date as (
+    select customer_id, order_id, sub_category,
+        row_number() over(partition by customer_id order by transaction_date asc) as [rank_date]
+    from table_joined
+)
+select sub_category,
+    count(distinct customer_id) as [num_order],
+    sum(count(distinct customer_id)) over() as [total_orde],
+    format(cast(count(distinct customer_id) as float) / sum(count(distinct customer_id)) over(), 'p') as [percent]
+from table_rank_date
+where rank_date = 1
+group by sub_category
+order by count(customer_id) desc
