@@ -36,7 +36,7 @@ with table_joined as (
     where [rank_day] = 1
 )
 select segment,
-    count(customer_id) as [num_customers],
+    count(distinct customer_id) as [num_customers],
     sum(count(customer_id)) over() as [total_customers],
     format(cast(count(customer_id) as float) / sum(count(customer_id)) over(), 'p') as [percent]
 from table_segment
@@ -44,9 +44,9 @@ group by segment
 order by count(customer_id) desc
 
 
--- Top những sản phẩm cuối cùng mà khách hàng mua ?
+-- Top những sản phẩm cuối cùng mà khách hàng mua và số tiền lần thanh toán của nhóm sản phẩm nào cao nhất ?
 with table_joined as (
-    select customer_id, order_id, sub_category, transaction_date,
+    select customer_id, order_id, sub_category, transaction_date, final_price,
         row_number() over(partition by customer_id order by transaction_date desc) as [rank_day]
     from (
         select * from payment_history_17
@@ -61,18 +61,20 @@ with table_joined as (
     and message_id = 1 
 )
 select top 5 sub_category,
-    count(customer_id) as [num_customers],
-    sum(count(customer_id)) over() as [total_customers],
-    format(cast(count(customer_id) as float) / sum(count(customer_id)) over(), 'p') as [percent]
+    count(distinct customer_id) as [num_customers],
+    sum(cast(final_price as bigint)) as [total_price_by_sub],
+    sum(sum(cast(final_price as bigint))) over() as [total_price],
+    format(cast(count(distinct customer_id) as float) / sum(count(distinct customer_id)) over(), 'p') as [percent_num_cus],
+    format(cast(sum(cast(final_price as bigint)) as float) / sum(sum(cast(final_price as bigint))) over(), 'p') as [percent_price]
 from table_joined
 where [rank_day] = 1 -- lấy giá trị ngày cuối cùng mua hàng
 group by sub_category
-order by  count(customer_id) desc
+order by count(customer_id) desc
 
 
 -- Tỉ lệ thanh tóa thành công và thất bại theo đơn hàng
 with table_joined as (
-    select customer_id, order_id, [description],  transaction_date
+    select customer_id, order_id, [description],  transaction_date, online_offline
     from (
         select * from payment_history_17
         union all select * from payment_history_18
@@ -87,17 +89,150 @@ with table_joined as (
     )
 )
 , table_status as (
-    select [description],
+    select [description], online_offline,
         case when [description] = 'Success' then 'Success' else 'Faild' end as [payment_status]
     from table_joined
 )
-select payment_status,
+select online_offline, payment_status,
     count([description]) as[count_status],
-    format(cast(count([description]) as float) / sum(count([description])) over(), 'p') as [percent]
+    format(cast(count([description]) as float) / sum(count([description])) over(partition by payment_status), 'p') as [percent]
 from table_status
-group by payment_status
-order by count([description]) desc
+group by online_offline, payment_status
+order by payment_status
+
+
+-- Xác định tỉ lệ thanh toán thất bại theo mô tả
+with table_joined as (
+    select customer_id, order_id, [description],  transaction_date
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id != 1
+)
+select  [description],
+    count(order_id) as [num_order],
+    sum(count(order_id)) over() as [total_order],
+    format(cast( count(order_id) as float) / sum(count(order_id)) over(), 'p') as [percent]
+from table_joined
+group by [description]
+order by  count(order_id) desc
+
+
+-- Retention rate
+with table_joined as (
+    select customer_id, order_id,  transaction_date,
+        first_month = min(month(transaction_date)) over(partition by customer_id),
+        month_n = month(transaction_date) - min(month(transaction_date)) over(partition by customer_id)
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id = 1
+)
+, table_cohort as (
+    select 
+        first_month,
+        month_n,
+        count(distinct customer_id) as [retained_customers] 
+    from table_joined
+    group by first_month, month_n
+)
+select *,
+    max(retained_customers) over(partition by first_month) as [max_retained_by_fmonth],
+    format(cast(retained_customers as float) / max(retained_customers) over(partition by first_month), 'p') as [percent]
+from table_cohort
+order by first_month, month_n, retained_customers desc
 
 
 
-select * from table_message
+-- Tính tỉ lệ số đơn hàng thanh toán theo phương thức online/offline theo từng tháng mua hàng của khách hàng đó
+with table_joined as (
+    select customer_id, order_id,  transaction_date, online_offline,
+        format(min(transaction_date) over(partition by customer_id), 'yyyy-MM') as first_month,
+        datediff(month, min(transaction_date) over(partition by customer_id), transaction_date) as month_n
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id = 1
+)
+, table_cohort as (
+    select 
+        first_month,
+        month_n,
+        count(case when online_offline = 'Online' then online_offline end) as [num_onl],
+        count(case when online_offline = 'Offline' then online_offline end) as [num_off],
+        count(case when online_offline = 'Not payment' then online_offline end) as [num_not_payment]
+    from table_joined
+    group by first_month, month_n
+)
+select *,
+    format(cast([num_onl] as float) / ([num_onl] + [num_off] + [num_not_payment]), 'p') as [pct_order_onl],
+    format(cast([num_off] as float) / ([num_onl] + [num_off] + [num_not_payment]), 'p') as [pct_order_off],
+    format(cast([num_not_payment] as float) / ([num_onl] + [num_off] + [num_not_payment]), 'p') as [pct_order_not_payment]
+from table_cohort
+order by first_month, month_n
+
+
+
+
+with table_joined as (
+    select customer_id, order_id, transaction_date, online_offline,
+        format(min(transaction_date) over(partition by customer_id), 'yyyy-MM') as first_month,
+        datediff(month, min(transaction_date) over(partition by customer_id), transaction_date) as month_n
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+        on table_union.product_id = pro.product_number
+    join table_message as mess
+        on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id
+        from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id = 1
+)
+, table_cohort as (
+    select 
+        first_month,
+        month_n,
+        count(case when online_offline = 'Online' then 1 end) as num_onl,
+        count(case when online_offline = 'Offline' then 1 end) as num_off,
+        count(case when online_offline = 'Not payment' then 1 end) as num_not_payment
+    from table_joined
+    group by first_month, month_n
+)
+select *,
+    format(cast(num_onl as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_onl,
+    format(cast(num_off as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_off,
+    format(cast(num_not_payment as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_not_payment
+from table_cohort
+order by first_month, month_n
