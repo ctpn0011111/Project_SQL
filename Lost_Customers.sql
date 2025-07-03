@@ -130,8 +130,8 @@ order by  count(order_id) desc
 -- Retention rate
 with table_joined as (
     select customer_id, order_id,  transaction_date,
-        first_month = min(month(transaction_date)) over(partition by customer_id),
-        month_n = month(transaction_date) - min(month(transaction_date)) over(partition by customer_id)
+        format(min(transaction_date) over(partition by customer_id), 'yyyy-MM') as first_month,
+        datediff(month, min(transaction_date) over(partition by customer_id), transaction_date) as month_n
     from (
         select * from payment_history_17
         union all select * from payment_history_18
@@ -199,40 +199,95 @@ from table_cohort
 order by first_month, month_n
 
 
-
-
+-- Tổng số tiền thanh toán mà công ty thu được từ tập khách hàng Lost Bad Customers
 with table_joined as (
-    select customer_id, order_id, transaction_date, online_offline,
-        format(min(transaction_date) over(partition by customer_id), 'yyyy-MM') as first_month,
-        datediff(month, min(transaction_date) over(partition by customer_id), transaction_date) as month_n
+    select customer_id, order_id, [final_price]
     from (
         select * from payment_history_17
         union all select * from payment_history_18
     ) as table_union
     join product as pro
-        on table_union.product_id = pro.product_number
+    on table_union.product_id = pro.product_number
     join table_message as mess
-        on table_union.message_id = mess.message_id
+    on table_union.message_id = mess.message_id
     where customer_id in (
-        select customer_id
-        from table_tonghop
+        select customer_id from table_tonghop
         where segment = 'Lost Bad Customers'
     )
-    and table_union.message_id = 1
+    and table_union.message_id != 1
 )
-, table_cohort as (
-    select 
-        first_month,
-        month_n,
-        count(case when online_offline = 'Online' then 1 end) as num_onl,
-        count(case when online_offline = 'Offline' then 1 end) as num_off,
-        count(case when online_offline = 'Not payment' then 1 end) as num_not_payment
+, table_total_price as (
+    select customer_id,
+        count(order_id) as [num_order],
+        sum(cast(final_price as bigint)) as [num_price]
     from table_joined
-    group by first_month, month_n
+    group by customer_id
 )
-select *,
-    format(cast(num_onl as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_onl,
-    format(cast(num_off as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_off,
-    format(cast(num_not_payment as float) / nullif((num_onl + num_off + num_not_payment), 0), 'p') as pct_order_not_payment
-from table_cohort
-order by first_month, month_n
+select distinct count(num_order) over() as [total_order],
+    sum(num_price) over() [total_price],
+    round(cast(sum(num_price) over() as float) / count(num_order) over(), 2) as [avg_price]
+from table_total_price
+
+
+
+-- Tổng đơn hàng có mã giảm giá và đơn hàng bình thường. Số tiền tương ứng với từng nhóm
+with table_joined as (
+    select customer_id, order_id, [promotion_id]
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id != 1
+)
+, table_slicer_promotion as (
+    select customer_id, 
+        count(order_id) as [num_order],
+        count(case when promotion_id <> '0' then order_id end) as [total_order_promotion],
+        count(case when promotion_id = '0' then order_id end) as [total_order_normal]
+    from table_joined
+    group by customer_id
+)
+select distinct sum([num_order]) over() as [total_order],
+    sum([total_order_promotion]) over() as [total_order_pro],
+    sum([total_order_normal]) over() as [total_order_normal]
+from table_slicer_promotion;
+
+
+
+-- Tổng số tiền mà khách thanh toán theo từng nhóm (promotion, normal)
+with table_joined as (
+    select customer_id, order_id, [promotion_id], final_price
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id != 1
+)
+, table_total_price as (
+    select
+        sum(case when promotion_id <> '0' then final_price end) as [total_price_promotion],
+        sum(case when promotion_id = '0' then final_price end) as [total_price_normal]
+    from table_joined
+)
+select 
+    total_price_promotion,
+    total_price_normal,
+    format(cast([total_price_promotion] as float) / ([total_price_promotion] + [total_price_normal]), 'p') as [pct_promotion],
+    format(cast([total_price_normal] as float) / ([total_price_promotion] + [total_price_normal]), 'p') as [pct_normal]
+from table_total_price;
