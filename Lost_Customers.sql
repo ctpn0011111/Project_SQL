@@ -214,7 +214,7 @@ with table_joined as (
         select customer_id from table_tonghop
         where segment = 'Lost Bad Customers'
     )
-    and table_union.message_id != 1
+    and table_union.message_id = 1
 )
 , table_total_price as (
     select customer_id,
@@ -245,7 +245,7 @@ with table_joined as (
         select customer_id from table_tonghop
         where segment = 'Lost Bad Customers'
     )
-    and table_union.message_id != 1
+    and table_union.message_id = 1
 )
 , table_slicer_promotion as (
     select customer_id, 
@@ -277,7 +277,7 @@ with table_joined as (
         select customer_id from table_tonghop
         where segment = 'Lost Bad Customers'
     )
-    and table_union.message_id != 1
+    and table_union.message_id = 1
 )
 , table_total_price as (
     select
@@ -291,3 +291,38 @@ select
     format(cast([total_price_promotion] as float) / ([total_price_promotion] + [total_price_normal]), 'p') as [pct_promotion],
     format(cast([total_price_normal] as float) / ([total_price_promotion] + [total_price_normal]), 'p') as [pct_normal]
 from table_total_price;
+
+
+-- Thống kê số lượng sản phẩm theo từng tháng
+with table_joined as (
+    select customer_id, order_id, [transaction_date], sub_category
+    from (
+        select * from payment_history_17
+        union all select * from payment_history_18
+    ) as table_union
+    join product as pro
+    on table_union.product_id = pro.product_number
+    join table_message as mess
+    on table_union.message_id = mess.message_id
+    where customer_id in (
+        select customer_id from table_tonghop
+        where segment = 'Lost Bad Customers'
+    )
+    and table_union.message_id = 1
+)
+, table_total as (
+    select 
+        month(transaction_date) as [month],
+        sub_category,
+        count(order_id) as [num_order_by_category],
+        sum(count(order_id)) over(partition by sub_category) as [total_order]
+    from table_joined
+    group by month(transaction_date), sub_category
+)
+select *
+from table_total
+PIVOT(
+    sum([num_order_by_category])
+    for [month] in("1","2","3","4","5","6","7","8","9","10","11","12")
+) as pivot_logic
+order by [total_order] desc
